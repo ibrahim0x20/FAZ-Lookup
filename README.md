@@ -1,6 +1,6 @@
 # FAZ-Lookup
 
-![FAZ-Lookup Screenshot](Capture.png)
+![FAZ-Lookup Screenshot](Capture.PNG)
 
 
 FAZ-Lookup is a simple Fortinet FortiAnalyzer (FAZ) lookup tool that allows you to search and retrieve logs from FortiAnalyzer or a local SQLite database.
