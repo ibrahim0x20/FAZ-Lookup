@@ -1,0 +1,102 @@
+{
+
+	"uri" : "https://192.168.1.100/jsonrpc",
+	"waf": 
+	{	
+		"devid" : "All_FortiWeb",
+		"adom" : "FortiWeb",
+		"devtype": "FortiWeb",
+		"logtype": 
+		{
+			"traffic": [
+						"itime", "date", "time", "id", "policy", "src", "dst", "http_method", "http_retcode", "http_host", "http_url", "http_agent", "log_id", 
+						"srccountry", "content_switch_name", "server_pool_name", "service", "user_name", "http_refer"
+			],
+			
+			"attack": [
+						"itime", "date", "time", "device_id", "src", "dst", "policy", "action", "http_host", "http_url", "msg", "dtime", "log_id", 
+						"type", "subtype", "pri", "msg_id", "service", "dst_port", "http_method", "http_agent", "http_session_id",
+						"severity_level", "signature_subclass", "signature_id", "srccountry", "content_switch_name", "server_pool_name", 
+						"user_name", "http_refer", "http_version", "dev_id", "threat_weight", "history_threat_weight", "threat_level",
+						"main_type", "matched_field", "monitor_status", "matched_pattern", "owasp_top10", "bot_info", "backend_service", "data", 
+						"data_format", "client_level"
+			]
+		}
+	},
+	
+	"proxy" : 
+	{
+		"devid": "All_FortiProxy",
+		"adom" : "FortiProxy",
+		"devtype": "Proxy",
+		"logtype": 
+		{		
+			"traffic": [
+						"itime", "date", "time", "id", "action", "srcip", "dstip", "service", "sentbyte", "rcvdbyte", "user", "app", "utmaction", "dtime", "subtype",
+						"level", "dstport", "proto", "policyid", "group", "msg", "srcintf", "dstintf", "sessionid", "crlevel", "craction", 
+						"trandisp", "duration", "policytype", "sslaction", "wanin", "wanout", "lanin", "lanout", "appcat", "transip", 
+						"transport", "dstcountry", "appid", "srccountry", "poluuid", "apprisk", "countapp", "agent", "policyname", "hostname", 
+						"url", "scheme", "reqlength", "resplength", "resptype", "reqtime", "resptime", "respfinishtime", "authserver"
+
+			],
+			
+			"event":  [
+						"itime", "date", "time", "id", "logid", "subtype", "level", "eventtime", "action", "msg", "logdesc", "filesize", 
+						"devid", "dtime", "itime_t", "srcip", "dstip", "user", "status", "reason", "authproto", "mem", "disk", "bandwidth", 
+						"disklograte", "fazlograte", "setuprate", "totalsession", "sysuptime", "freediskstorage"
+			],
+			
+			"webfilter": [
+							"itime", "date", "time", "id", "logid", "level", "eventtime", "action", "srcip", "dstip", "policyid", "user", 
+							"msg", "sessionid", "eventtype", "hostname", "profile", "url", "sentbyte", "rawdata", "transid", "dtime", "itime_t"
+			],
+			
+			"app-ctrl":  [
+							"itime", "date", "time", "id", "logid", "level", "eventtime", "action", "srcip", "srcport", "dstip", "dstport", 
+							"service", "policyid", "user", "group", "msg", "sessionid", "direction", "apprisk", "appcat", "app", "appid", "hostname", "url", 
+							"incidentserialno", "dtime", "itime_t"
+			]
+		}
+	},
+	
+	"firewall" : 
+	{
+		"devid": "All_FortiGate",
+		"adom" : "FortiGate",
+		"devtype": "Fortigate",
+		"logtype": 
+		{
+			"traffic":[
+				"itime", "date", "time", "id", "srcip", "dstip", "dstport", "service", "proto", "action", "policyid", "policyname", "hostname", 
+				"tranip", "transip", "sessionid", "subtype", "level", "duration", "sentbyte", "rcvdbyte", "logid", "app", 
+				"appcat", "crscore", "craction", "crlevel", "srccountry", "dstcountry", "srcintf", "dstintf", "threats", "threattyps", "devid", 
+				"dtime", "devname", "utmaction", "appid", "apprisk", "applist", "apps", 
+				"dstmac", "masterdstmac", "dsthwvendor", "dstosname", "sentdelta", "rcvddelta", "srcmac", "mastersrcmac", "srchwvendor", "srcfamily", 
+				"devtype", "osname", "user", "srcname", "srcswversion", "srcinetsvc", "srccity", "srcreputation", "wanin", "wanout", "lanin", "lanout", "unauthuser", 
+				"srcregion", "tdthreattype", "tdthreatname", "tdwfcate"
+			],
+			
+			"attack": [
+						"itime", "date", "time", "id", "devid", "severity", "srcip", "dstip", "action", "service", "user", "count", "dtime", "devname", "type", 
+						"subtype", "level", "sessionid", "dstport", "attackid", "slot", "proto", "logid", "eventtime", "policyid", "incidentserialno", 
+						"crscore", "craction", "crlevel", "direction", "policytype", "icmpid", "icmptype", "icmpcode", "srcintf", "dstintf", "ref", "attack", 
+						"eventtype", "hostname", "url", "srccountry", "forwardedfor", "msg", "dstcountry", "poluuid", "cve"
+			],
+			
+			"webfilter": [
+							"itime", "date", "time", "id", "level", "action", "sessionid", "srcip", "dstip", "dstport", "cat", "logid", "service", "eventtime", 
+							"sentbyte", "rcvdbyte", "crscore", "crlevel", "url", "hostname", "catdesc", "eventtype", "msg", "dstcountry", 
+							"dtime", "itime_t"
+			],
+			
+			"app-ctrl": [
+							"itime", "date", "time", "id", "epid", "dstepid", "logver", "level", "action", "sessionid", 
+							"policyid", "srcip", "dstip", "dstport", "proto", "logid", "service", "eventtime", "incidentserialno", 
+							"direction", "apprisk", "appid", "dstintfrole", "applist", "appcat", "app", "srcintf", "dstintf", 
+							"msg", "srccountry", "dstcountry", "poluuid", "devid", "dtime", "itime_t", "devname", "hostname", 
+							"url", "scertcname", "siappid", "scertissuer", "crscore", "crlevel"
+			]
+		}
+	}
+	
+}
