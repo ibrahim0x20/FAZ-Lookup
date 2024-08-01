@@ -53,23 +53,23 @@ The `-query` option accepts queries that comply with both FortiAnalyzer Filter s
 
 1. Search for traffic logs in the firewall ADOM:
 
-python FAZ-Lookup.py -adom firewall -logtype traffic -st "2024-07-01 00:00" -et "2024-07-02 00:00" -query "srcip='192.168.1.100'"
+<code>python FAZ-Lookup.py -adom firewall -logtype traffic -st "2024-07-01 00:00" -et "2024-07-02 00:00" -query "srcip='192.168.1.100'"</code>
 
 2. Retrieve application control logs from the proxy ADOM in JSON format:
 
-python FAZ-Lookup.py -adom proxy -logtype app-ctrl -st "2024-07-01 00:00" -et "2024-07-02 00:00" -r json
+<code>python FAZ-Lookup.py -adom proxy -logtype app-ctrl -st "2024-07-01 00:00" -et "2024-07-02 00:00" -r json</code>
 
 3. Update the local SQLite database for WAF logs:
 
-python FAZ-Lookup.py -adom waf -logtype attack -st "2024-07-01 00:00" -et "2024-07-02 00:00" -update-db
+<code>python FAZ-Lookup.py -adom waf -logtype attack -st "2024-07-01 00:00" -et "2024-07-02 00:00" -update-db</code>
 
 4. List available fields for traffic logs:
 
-python FAZ-Lookup.py -adom firewall -logtype traffic -fields
+<code>python FAZ-Lookup.py -adom firewall -logtype traffic -fields</code>
 
 5. Search for top visited URLs:
 
-python FAZ-Lookup.py -adom proxy -logtype traffic -st "2024-07-01 00:00" -et "2024-07-02 00:00" -query "TOP 10 http_url"
+<code>python FAZ-Lookup.py -adom proxy -logtype traffic -st "2024-07-01 00:00" -et "2024-07-02 00:00" -query "TOP 10 http_url"</code>
 
 ## Note
 
