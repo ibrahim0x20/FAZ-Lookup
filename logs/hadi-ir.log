@@ -1,0 +1,5 @@
+Log file initialized at 2025-03-24T01:32:03Z
+2025-03-24T01:32:03Z DT-ITU01-173.KACST.KSA Info: __main__: Logger is setup correctly
+2025-03-24T01:32:10Z DT-ITU01-173.KACST.KSA Info: __main__: Start fields types identification: ['itime', 'date', 'time', 'id', 'action', 'srcip', 'dstip', 'service', 'sentbyte', 'rcvdbyte', 'user', 'app', 'utmaction', 'dtime', 'subtype', 'level', 'dstport', 'proto', 'policyid', 'group', 'msg', 'srcintf', 'dstintf', 'sessionid', 'crlevel', 'craction', 'trandisp', 'duration', 'policytype', 'sslaction', 'wanin', 'wanout', 'lanin', 'lanout', 'appcat', 'transip', 'transport', 'dstcountry', 'appid', 'srccountry', 'poluuid', 'apprisk', 'countapp', 'agent', 'policyname', 'hostname', 'url', 'scheme', 'reqlength', 'resplength', 'resptype', 'reqtime', 'resptime', 'respfinishtime', 'authserver']
+2025-03-24T01:32:10Z DT-ITU01-173.KACST.KSA Info: __main__: Identified primary key: id
+2025-03-24T01:32:10Z DT-ITU01-173.KACST.KSA Info: __main__: FAZsqlite initialized successfully ...

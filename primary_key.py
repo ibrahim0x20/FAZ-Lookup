@@ -1,55 +1,43 @@
-import sys
-import os
 import json
-import argparse
-import time
-from typing import List, Set, Callable, Any, Dict, Optional, Union, Tuple
-from collections import defaultdict
-import aiohttp
 import re
+import sys
+import logging
+import asyncio
+import aiohttp
+from collections import defaultdict
+from typing import Dict, List, Any, Optional
 
-# My defined modules
-# ******************************************************
-from hadi_logger import get_logger
-
-# Centralized logger initialization
-logger = get_logger(
-    module_name=__name__,
-    log_file=os.getenv("HADI_LOG_FILE", os.path.join("logs", "hadi-ir.log")),
-    debug_mode=False  # Default to False, will be updated with command line args
-)
-
-from helpers import ConfigManager
-from mySQLite import SQLiteManager
-from FAZapi import FAZapi
-from helpers import *
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
-# ******************************************************
-
-class FAZsqlite:
-    def __init__(self, options, config: ConfigManager, client: FAZapi):
+class DataFieldAnalyzer:
+    def __init__(self, fields=None, search_request_func=None):
         """
-        Initialize the FAZapi client.
+        Initialize the analyzer with optional fields list and search request function.
+
         Args:
-            options: Command line options
-            config: Configuration manager
+            fields (list, optional): List of fields to analyze
+            search_request_func (callable, optional): Function to make search requests
         """
-        self.base_url = 'https://' + options.host + '/jsonrpc'
-        self.adom_name = config.adom
-        self.devid = config.devid
-        self.devtype = config.devtype
-        self.fields = config.fields
-        self.debug = options.verbose
+        self.fields = fields if fields else []
+        self.search_request = search_request_func
 
-        self.search_request = client.search_request
-        self.search_request_status = client.search_request_status
-        self.close_tid = client.close_tid
+    async def search_request_status(self, session, tid):
+        """
+        Placeholder method for getting search request status.
+        This should be implemented based on your actual API.
+        """
+        # Implement based on your actual API
+        pass
 
-        self.primary_key = None
-        self.fields_types = asyncio.run(self._detect_field_types())
-
-        logger.info("FAZsqlite initialized successfully ...")
+    def close_tid(self, tid):
+        """
+        Placeholder method for closing a search request.
+        This should be implemented based on your actual API.
+        """
+        # Implement based on your actual API
+        pass
 
     def _is_timestamp(self, field, value):
         """
@@ -92,11 +80,12 @@ class FAZsqlite:
 
         return False
 
-    async def _detect_field_types(self, retry_count=0, max_retries=3) -> Dict[str, str]:
+    async def detect_field_types(self, data: List[Dict[str, Any]], retry_count=0, max_retries=3) -> Dict[str, str]:
         """
-        Detect field types from the search results with retry logic.
+        Detect field types from the provided data with retry logic.
 
         Args:
+            data (list): List of dictionaries containing records
             retry_count (int): Current retry attempt
             max_retries (int): Maximum number of retry attempts
 
@@ -106,31 +95,6 @@ class FAZsqlite:
         if retry_count >= max_retries:
             logger.error(f"Failed to determine field types after {max_retries} attempts")
             return {}
-
-        data = []
-        try:
-            async with aiohttp.ClientSession() as session:
-                # Get search results
-                tid = self.search_request()
-                if not tid:
-                    logger.error("Failed to create search request")
-                else:
-                    results_resp = await self.search_request_status(session, tid)
-                    if results_resp.get('result', {}).get('data', []):
-                        data = results_resp.get('result', {}).get('data', [])
-                        logger.info(f"Start fields types identification: {self.fields}")
-                        logger.debug(f"Sample data: {json.dumps(data[:2], indent=2)}")
-                    else:
-                        logger.info("No data found for the current search options")
-                        return {}
-
-                    # Close the transaction ID
-                    self.close_tid(tid)
-
-        except Exception as e:
-            logger.error(f"Failed to determine field types: {str(e)}")
-            # Implement retry logic
-            return await self._detect_field_types(retry_count + 1, max_retries)
 
         try:
             # Get all field names if not specified
@@ -142,7 +106,7 @@ class FAZsqlite:
             fields_to_check = self.fields if self.fields else list(all_fields)
 
             # Initialize fields_types with TEXT as default
-            self.fields_types = {field: "TEXT" for field in fields_to_check}
+            fields_types = {field: "TEXT" for field in fields_to_check}
 
             # Process each item to determine types
             for item in data:
@@ -165,33 +129,23 @@ class FAZsqlite:
 
                         # Update with priority: TIMESTAMP > DECIMAL > INTEGER > VARCHAR_IP > VARCHAR
                         if detected_type == "TIMESTAMP":
-                            self.fields_types[field] = "TIMESTAMP"
-                        elif detected_type == "DECIMAL" and self.fields_types[field] not in ["TIMESTAMP"]:
-                            self.fields_types[field] = "DECIMAL"
-                        elif detected_type == "INTEGER" and self.fields_types[field] not in ["TIMESTAMP", "DECIMAL"]:
-                            self.fields_types[field] = "INTEGER"
-                        elif detected_type == "VARCHAR_IP" and self.fields_types[field] not in ["TIMESTAMP", "DECIMAL",
-                                                                                                "INTEGER"]:
-                            self.fields_types[field] = "VARCHAR_IP"
+                            fields_types[field] = "TIMESTAMP"
+                        elif detected_type == "DECIMAL" and fields_types[field] not in ["TIMESTAMP"]:
+                            fields_types[field] = "DECIMAL"
+                        elif detected_type == "INTEGER" and fields_types[field] not in ["TIMESTAMP", "DECIMAL"]:
+                            fields_types[field] = "INTEGER"
+                        elif detected_type == "VARCHAR_IP" and fields_types[field] not in ["TIMESTAMP", "DECIMAL",
+                                                                                           "INTEGER"]:
+                            fields_types[field] = "VARCHAR_IP"
 
-            # If debug is enabled, run analysis on the data
-            if self.debug :  # DEBUG level
-                analysis_report = await self.analyze_data(data)
-                logger.debug(f"Field type analysis:\n{analysis_report}")
-
-            # Identify primary key using the data
-            primary_key_result = await self._identify_primary_key(data)
-            self.primary_key = primary_key_result['best_candidate']
-            logger.info(f"Identified primary key: {self.primary_key}")
-
-            return self.fields_types
+            return fields_types
 
         except Exception as e:
-            logger.error(f"Error in detect_field_types: {str(e)}")
+            logger.error(f"Failed to determine field types: {str(e)}")
             # Implement retry logic
-            return await self._detect_field_types(retry_count + 1, max_retries)
+            return await self.detect_field_types(data, retry_count + 1, max_retries)
 
-    async def _identify_primary_key(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def identify_primary_key(self, data: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Analyzes data to identify potential primary key fields with improved logic.
 
@@ -202,7 +156,7 @@ class FAZsqlite:
             dict: Dictionary of potential primary key fields and their uniqueness stats
         """
         if not data:
-            return {"error": "No data provided", "best_candidate": None, "field_stats": {}}
+            return {"error": "No data provided"}
 
         # Get all field names from the first record
         all_fields = set(data[0].keys())
@@ -210,7 +164,7 @@ class FAZsqlite:
         # Check if all records have the same fields
         for record in data:
             if set(record.keys()) != all_fields:
-                # logger.warning("Not all records have the same fields")
+                logger.warning("Not all records have the same fields")
                 all_fields = all_fields.union(set(record.keys()))
 
         # Count occurrences of each value for each field
@@ -223,8 +177,8 @@ class FAZsqlite:
         monotonic_increasing = {}
         monotonic_decreasing = {}
 
-        # Use already detected field types if available
-        field_types = self.fields_types if self.fields_types else {}
+        # Get field types asynchronously
+        field_types = await self.detect_field_types(data)
 
         # Analyze each field
         for record in data:
@@ -246,14 +200,12 @@ class FAZsqlite:
                             else:
                                 try:
                                     # Handle large integer strings that might exceed normal int range
-                                    if field_types.get(field) == 'INTEGER' and value.isdigit() and prev_values[
-                                        field].isdigit():
+                                    if field_types.get(field) == 'INTEGER' and value.isdigit() and prev_values[field].isdigit():
                                         curr_val = int(value)
                                         prev_val = int(prev_values[field])
                                     else:
                                         curr_val = float(value) if '.' in value else int(value)
-                                        prev_val = float(prev_values[field]) if '.' in prev_values[field] else int(
-                                            prev_values[field])
+                                        prev_val = float(prev_values[field]) if '.' in prev_values[field] else int(prev_values[field])
 
                                     # Update monotonic status
                                     if curr_val <= prev_val:
@@ -376,7 +328,7 @@ class FAZsqlite:
                 data = data_or_json
 
             # Identify primary key candidates
-            result = await self._identify_primary_key(data)
+            result = await self.identify_primary_key(data)
 
             if "error" in result:
                 return f"Error: {result['error']}"
@@ -448,122 +400,16 @@ class FAZsqlite:
             return "\n".join(report)
 
         except Exception as e:
-            logger.error(f"Error processing data: {str(e)}")
             return f"Error processing data: {str(e)}"
 
-def setup_argument_parser():
-    """Set up command line argument parser"""
-    parser = argparse.ArgumentParser(description='FAZ SQLite Database Updater')
-    parser.add_argument('host', help='FAZ host address')
-    parser.add_argument('adom', help='ADOM name')
-    parser.add_argument('-logtype', '--logtype', required=True, help='Log type')
-    parser.add_argument('-q', '--query', help='Query string')
-    parser.add_argument('-st', '--starttime', required=True, help='Start time (YYYY-MM-DD HH:MM)')
-    parser.add_argument('-et', '--endtime', required=True, help='End time (YYYY-MM-DD HH:MM)')
-    parser.add_argument('-t', '--timeout', type=int, default=60, help='Timeout for fetching data for a TID (in seconds)')
+async def main():
+    with open('FAZlogs/update.log', 'r') as file:
+        log_data = json.load(file)
 
-    parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
-    return parser
-
-
-def main():
-    # Check if script is called with JSON argument (from subprocess)
-    if len(sys.argv) > 1 and sys.argv[1].startswith('{'):
-        # Called from subprocess with JSON string
-        args_json = sys.argv[1]
-        args_dict = json.loads(args_json)
-        args = argparse.Namespace(**args_dict)
-    else:
-        # Called directly from terminal
-        parser = setup_argument_parser()
-        args = parser.parse_args()
-
-    # Set up logging
-    logger.debug_mode = args.verbose
-    logger.info("Logger is setup correctly")
-
-    # Initialize configuration
-    config = ConfigManager()
-    if not config.load_config(args):
-        logger.error("Failed to load configuration")
-        return
-
-    # Log configuration details
-    FORTI = 'https://' + args.host + '/jsonrpc'
-    logger.debug(f"Successfully extracted information for ADOM type: {args.adom}")
-    logger.debug(f"FortiFaz: {FORTI}")
-    logger.debug(f"ADOM_NAME: {config.adom}")
-    logger.debug(f"Device ID: {config.devid}")
-    logger.debug(f"Device type: {config.devtype}")
-    logger.debug(f"Log Type: {args.logtype}")
-    logger.debug(f"Fields: {config.fields}")
-
-    if args.adom == 'waf':
-        white_list_file = os.path.join('FAZlogs', 'WhiteListURL.txt')
-        if os.path.exists(white_list_file):
-            with open(white_list_file, 'r') as file:
-                logger.debug(f"Reading white list URLs from 'WhiteListURL.txt'")
-                WhiteListURLs = [line.strip() for line in file.readlines()]
-    else:
-
-        white_list_file = os.path.join('FAZlogs', 'WhiteListIPs.txt')
-        if os.path.exists(white_list_file):
-            with open(white_list_file, 'r') as file:
-                logger.debug(f"Reading white list IPs from 'WhiteListIPs.txt'")
-                WhiteListIPs = [line.strip() for line in file.readlines()]
-
-    client = FAZapi(args, config)
-    # Initialize FAZsqlite and execute search
-
-    faz_sqlite = FAZsqlite(args, config, client)
-    print(json.dumps(faz_sqlite.fields_types, indent=2))
-    sys.exit(0)
-    db_path = os.path.join('FAZlogs', f'{config.devtype}.db')
-    if args.adom == 'waf':
-        logger.info(f"Updating WhiteListURLs, and cleaning {config.devtype}.db SQLit database.")
-        conn = SQLiteManager(db_path)
-        # Specify which fields should be integers
-
-
-
-        # Create a table to store the data, using msg_id as the primary key
-        # create_table_sql = f'''
-        #     CREATE TABLE IF NOT EXISTS {args.logtype} (
-        #         {", ".join([f"{field} {'INTEGER' if field in int_fields else 'TEXT'}" for field in fields if field != 'id'])},
-        #         id INTEGER PRIMARY KEY
-        #     )
-        #     '''
-    # args.query = "!((dstip='172.16.0.0/12' and srcip='10.0.0.0/8') or (srcip='172.16.0.0/12' and dstip='10.0.0.0/8') or (srcip='10.0.0.0/8' and dstip='10.0.0.0/8') or (srcip='172.16.0.0/12' and dstip='172.16.0.0/12'))"
-    # process_log_files(devtype)
-    #
-    # # Create and populate the timeline table
-    # create_and_populate_timeline(db_path, args_namespace.logtype)
-
-    start_execution_time = time.time()
-    result_printer = ResultsPrinter()
-    print_logs = result_printer.print_logs
-
-    whitelist_ips: List[str] = []
-    # Initialize the log printer
-    log_printer = ResultsPrinter()
-    # Create a callback function that uses the log_printer
-    def callback(results_resp_json):
-        log_printer.print_logs(
-            results_resp_json,
-            config.fields,
-            args.r,
-            whitelist_ips,
-            args.adom
-        )
-
-    total = client.search(callback)
-    end_execution_time = time.time()
-    execution_time = end_execution_time - start_execution_time
-    logger.info(f"Total results: {total}")
-
-    logger.info(f"Total execution time: {execution_time:.2f} seconds")
-    sys.exit(0)
+    analyzer = DataFieldAnalyzer()
+    report = await analyzer.analyze_data(json.dumps(log_data))
+    print(report)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

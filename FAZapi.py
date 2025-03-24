@@ -1,994 +1,879 @@
-# Example: python fortifaz-lookup19-progress-func.py -a waf -st "2024-06-20 20:00" -et "2024-06-21 00:00" -l attack -r csv > waf-attack.csv
-
 import requests
-import json
-import os
-import urllib3
-import sys
-import logging
-import argparse
-import urllib.parse
-import re
-import concurrent.futures
-import time
 import aiohttp
 import asyncio
-from asyncio_throttle import Throttler
-from asyncio.exceptions import TimeoutError
-from tenacity import retry, stop_after_attempt, wait_exponential
-from typing import List, Tuple, Dict, Optional
-from aiohttp import ClientSession, ClientError
-from asyncio import Semaphore
+import json
+import time
 from datetime import datetime, timedelta
-import fnmatch
-import operator
-import itertools
-import functools
-import inspect
-from color_logging import setup_colored_logging
-from concurrent.futures import ThreadPoolExecutor
+from tenacity import retry, stop_after_attempt, wait_exponential
+import urllib3
+from typing import List, Set, Callable, Any, Dict, Optional, Union, Tuple
+import os
+import sys
 import getpass
-import ipaddress
-from aiohttp import ClientTimeout
-import socket
+
+# Import your custom modules
+from hadi_logger import get_logger
+
+logger = get_logger()
+from helpers import print_to_console, safe_input, ResultsPrinter
+from progress import ProgressTracker
+
+# Disable insecure request warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
-import base64
-import gzip
-import io
-import csv
-
-
-
-global excluded_file, excluded_file_header_written, log_files_data
-
-# Global variables
-
-user = None
-password = None
-FORTI = None
-devid = None
-ADOM_NAME = None
-devtype = None
-session_cookie = None
-
-excluded_file = None
-excluded_file_header_written = False
-global_parsed_or_groups = None
-args = None
-is_redirected = None
-log_files_data = None
-
-DEBUG_MODE = False  # Set this based on your configuration
-  
-    
-def sanitize_sensitive_values(args_dict):
-    sanitized_dict = args_dict.copy()
-    sensitive_keys = ['password', 'token', 'api_key', 'secret']  # Add more sensitive keys as needed
-    for key in sensitive_keys:
-        if key in sanitized_dict:
-            sanitized_dict[key] = '***'
-    return sanitized_dict
-    
-    
-def safe_input(prompt):
-    print_to_console(prompt)
-    return input()
-
-
-def print_to_console(message):
-    if is_redirected:
-        print(message, file=sys.stderr, flush=True)
-        return
-    print(message)
-
-def is_debug_mode():
-    return getattr(args, 'verbose', False)
-
-def log_function_details(relevant_globals):
-    def decorator_log_details(func):
-        @functools.wraps(func)
-        def wrapper_log_details(*args, **kwargs):
-            if is_debug_mode():
-                log_function_info(func, args, kwargs, relevant_globals)
-            return func(*args, **kwargs)
-
-        @functools.wraps(func)
-        async def async_wrapper_log_details(*args, **kwargs):
-            if is_debug_mode():
-                log_function_info(func, args, kwargs, relevant_globals)
-            return await func(*args, **kwargs)
-
-        def log_function_info(func, args, kwargs, relevant_globals):
-            function_name = func.__name__
-            
-            # Get argument names
-            arg_spec = inspect.getfullargspec(func)
-            arg_names = arg_spec.args
-
-            # Combine args and kwargs
-            all_args = dict(zip(arg_names, args))
-            all_args.update(kwargs)
-
-            # Sanitize arguments
-            sanitized_args = sanitize_sensitive_values(all_args)
-            
-            # Global variables used in this function
-            global_vars = {var: globals().get(var) for var in relevant_globals if var in globals()}
-            sanitized_globals = sanitize_sensitive_values(global_vars)
-            
-            logging.info(f"Function name: {function_name}")
-            
-            if sanitized_args:
-                logging.info(f"Arguments and their values:")
-                for arg, value in sanitized_args.items():
-                    logging.info(f"  {arg}: {value}")
-                    
-            if sanitized_globals:
-                logging.info(f"Global variables used in {function_name}:")
-                for var, value in sanitized_globals.items():
-                    logging.info(f"  {var}: {value}")
-
-        if asyncio.iscoroutinefunction(func):
-            return async_wrapper_log_details
-        else:
-            return wrapper_log_details
-
-    return decorator_log_details
-    
-
-
-
-def read_json(file_path):
+class FAZapi:
     """
-    Reads and parses the JSON file at the given file path.
-    
-    Args:
-        file_path (str): The path to the JSON file.
-        
-    Returns:
-        dict: Parsed JSON data, or None if an error occurs.
+    Client for interacting with FortiAnalyzer API with optimized async processing.
     """
-    if not os.path.exists(file_path):
-        logging.error(f"The file '{file_path}' does not exist.")
-        return None
-    try:
-        with open(file_path, 'r') as file:
-            data = json.load(file)
-        return data
-    except json.JSONDecodeError:
-        logging.error(f"The file '{file_path}' contains invalid JSON.")
-        return None
-    except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
-        return None
 
-def extract_info(data):
-    """
-    Extracts information based on the device_type and log_type arguments.
-    
-    Args:
-        data (dict): The JSON data.
-        
-    Returns:
-        tuple: Extracted uri, devid, adom, devtype, and fields, or None if an error occurs.
-    """
-    
-    device_type = args.adom
-    log_type = args.logtype
-    
-    if device_type not in data:
-        logging.error(f"The device type '{device_type}' is not valid. Valid options are: {', '.join(data.keys())}.")
-        return None, None, None, None, None
+    def __init__(self, options, config):
+        """
+        Initialize the FAZapi client.
 
-    device_data = data[device_type]
-    uri = data.get('uri')
-    devid = device_data.get('devid')
-    adom = device_data.get('adom')
-    devtype = device_data.get('devtype')
-    fields = device_data['logtype'].get(log_type)
+        Args:
+            options: Command line options
+            config: Configuration manager
+        """
+        self.base_url = 'https://' + options.host + '/jsonrpc'
+        self.adom_name = config.adom
+        self.devid = config.devid
+        self.devtype = config.devtype
+        self.fields = config.fields
+        self.session_cookie = None
+        self.session_lock = asyncio.Lock()  # Lock for session management
 
-    # Log the extracted information for debugging
-    logging.debug(f"Extracted info for device type '{device_type}' and log type '{log_type}':")
-    logging.debug(f"URI: {uri}")
-    logging.debug(f"Device ID: {devid}")
-    logging.debug(f"ADOM: {adom}")
-    logging.debug(f"Device type: {devtype}")
-    logging.debug(f"Fields: {fields}")
+        # Request parameters
+        self.logtype = options.logtype
+        self.query = options.query
+        self.startTime = options.starttime
+        self.endTime = options.endtime
+        self.timeout = float(options.timeout)
 
-    return uri, devid, adom, devtype, fields
+        # Connection pool settings
+        self.max_connections = 20
+        self.connection_timeout = 30
 
-def call_FAZ_API(body):
-    
-    # Make the request to get the session cookie
-    logging.debug(json.dumps(body, indent=4))
-    
-    try:
-        session_resp = requests.post(FORTI, data=json.dumps(body), verify=False)
-        session_resp.raise_for_status()  # Raise an exception for HTTP errors
-        if session_resp.status_code != 200:
-            logging.error(f"API returned status code {search_resp.status_code}")
-            logging.error(f"call_FAZ_API: Response content: {search_resp.text}")
-            return None
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Error making request to FortiAnalyzer: {e}")
-        return None
-        
-            # Rest of your code
-    except Exception as e:
-        logging.error(f"call_FAZ_API: {str(e)}")
-        return None
-        
-    return session_resp
-        
-        
-@log_function_details(relevant_globals=["FORTI", "user", "password"])
-def get_session_cookie():
-    """
-    Authenticates with FortiAnalyzer and retrieves a session cookie.
-    
-    Returns:
-        str: The session cookie, or None if an error occurs.
-    """
-    global user, password, FORTI, session_cookie, args
-    # Authentication request body
-    # Authenticate and get session cookie
-    logging.debug("Attempting to get session cookie")
+        # Call session initialization (assumed to be implemented)
+        self.get_session_cookie()
 
-    file_path = 'session.key'
+        # Cache for request bodies to avoid repetitive dictionary creation
+        self._request_body_cache = {}
 
-    if os.path.exists(file_path):
-        with open(file_path, 'r') as file:
-            session_cookie = file.readline().strip()
-        
-        validate = check_session(args.st, args.et)
-        
-        if validate and validate != -11:
-            close_tid(validate)
-            return session_cookie
+        # Find the maximum search index idx_asc for progress tracking purpose
+        self.scale = 0
+        self.scale = asyncio.run(self.calculate_scale())
 
+    def get_session_cookie(self):
+        """
+        Authenticates with FortiAnalyzer and retrieves a session cookie.
 
-    user = safe_input("Enter your username: ")
-    password = getpass.getpass("Enter your password: ")
-    # session_cookie = get_session_cookie()
-    
-     # Save the new session cookie
-    
-    body1 = {
-        "method": "exec",
-        "params": [
-            {"url": "/sys/login/user", "data": {"passwd": password, "user": user}}
-        ],
-        "id": 1,
-        "jsonrpc": "2.0"
-    }
-    # Make the request to get the session cookie
-    
-    session_resp = call_FAZ_API(body1)
-    # Check if the response is valid JSON and contains the session key
-    
-    if session_resp:
+        Returns:
+            str: The session cookie, or None if authentication fails.
+        """
+        logger.debug("Attempting to get session cookie")
+        session_file = 'session.key'
+
+        # Try to load existing session
+        if os.path.exists(session_file):
+            try:
+                with open(session_file, 'r') as file:
+                    self.session_cookie = file.readline().strip()
+
+                # Validate existing session
+                tid = self.check_session()
+                if tid and tid != -11:
+                    self.close_tid(tid)
+                    return self.session_cookie
+            except Exception as e:
+                logger.error(f"Error loading session file: {str(e)}")
+
+        # If we get here, we need a new session
+        user = safe_input("Enter your username: ")
+        password = getpass.getpass("Enter your password: ")
+
+        body = {
+            "method": "exec",
+            "params": [
+                {"url": "/sys/login/user", "data": {"passwd": password, "user": user}}
+            ],
+            "id": 1,
+            "jsonrpc": "2.0"
+        }
+
         try:
+            session_resp = self.call_FAZ_API(body)
+            if not session_resp:
+                logger.error("Failed to get response from FortiAnalyzer API")
+                return None
+
             session_resp_json = session_resp.json()
             if 'session' in session_resp_json:
-                session_cookie = session_resp_json["session"]
-                with open('session.key', 'w') as file:
-                    file.write(session_cookie)
-                logging.debug("Successfully obtained session cookie")
-                logging.info("Successfully logged in")
-                return session_cookie
+                self.session_cookie = session_resp_json["session"]
+                # Save the session securely
+                try:
+                    with open(session_file, 'w') as file:
+                        file.write(self.session_cookie)
+                    os.chmod(session_file, 0o600)  # Set permissions to user read/write only
+                    logger.debug("Successfully obtained and saved session cookie")
+                    return self.session_cookie
+                except Exception as e:
+                    logger.error(f"Error saving session file: {str(e)}")
+                    return self.session_cookie
             else:
-                logging.error("'session' key not found in the response")
-                logging.info(f"Full Response from get_session_cookie: {session_resp_json}")
+                logger.error(f"'session' key not found in the response: {session_resp_json}")
                 return None
-        except json.JSONDecodeError:
-            logging.error("Error: Session response is not in JSON format")
-            logging.info(f"Full Response Content from get_session_cookie: {session_resp.content}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON response: {str(e)}")
+            if session_resp:
+                logger.debug(f"Response content: {session_resp.text[:200]}...")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in authentication: {str(e)}")
             return None
 
-def is_server_online(host, port, timeout=5):
-    """Check if the server is online."""
-    try:
-        socket.setdefaulttimeout(timeout)
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
-        return True
-    except socket.error as ex:
-        logging.error(f"Server {host}:{port} is not accessible: {ex}")
-        return False            
-        
-def check_session(startTime, endTime, time_order = 'desc'):
-    """
-    Starts a log search request with the given query and time range.
-    
-    Args:
-        query (str): The search query.
-        startTime (str): The start time in 'YYYY-MM-DD HH:MM' format.
-        endTime (str): The end time in 'YYYY-MM-DD HH:MM' format.
-        
-    Returns:
-        str: The task ID (tid) of the search request, or None if an error occurs.
-    """
-    
-    global ADOM_NAME, devid, session_cookie
+    def check_session(self):
+        """
+        Validates the current session by making a simple log search request.
 
-    body2 = {
-        "id": 2,
-        "jsonrpc": "2.0",
-        "method": "add",
-        "params": [
-            {
-                "apiver": 3,
-                "filter": "",
-                "logtype": "traffic",
-                "device": [{"devid": devid}],
-                "time-order": time_order,
-                "time-range": {"start": startTime, "end": endTime},
-                "url": f"/logview/adom/{ADOM_NAME}/logsearch",
-            }
-        ],
-        "session": session_cookie,
-    }
+        Returns:
+            int/str: The task ID (tid) of the search request if session is valid,
+                    -11 if session has expired, or None if an error occurs.
+        """
+        # Use current time for a minimal search
+        current_time = datetime.now()
+        startTime = (current_time - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M")
+        endTime = current_time.strftime("%Y-%m-%d %H:%M")
 
-    # Make the request to start the log search
-    host = FORTI.split('://')[1].split('/')[0]
-    if  not is_server_online(host, 443):
-        logging.error(f"FORTI FAZ: {host} is not online. Aborting.")
-        sys.exit(1)
-        
-    session_resp = call_FAZ_API(body2)
-    
-    if session_resp:
-        try:
-            search_resp_json = session_resp.json()
-            
-            if 'result' in search_resp_json:
-                if isinstance(search_resp_json['result'], list) and len(search_resp_json['result']) > 0:
-                    if 'status' in search_resp_json['result'][0] and 'code' in search_resp_json['result'][0]['status']:
-                        if search_resp_json["result"][0]["status"]["code"] == -11:
-                            logging.info(f"You are logged out. Please login again!")
-                            if args.verbose:
-                                logging.info(f"Session cookie expired: {search_resp_json['result'][0]['status']['message']}")
-                            tid = search_resp_json["result"][0]["status"]["code"]
-                        else:
-                            tid = search_resp_json["result"].get("tid")
-                    else:
-                        tid = search_resp_json["result"].get("tid")
-                elif isinstance(search_resp_json['result'], dict):
-                    tid = search_resp_json["result"].get("tid")
-                else:
-                    logging.error(f"Unexpected 'result' structure: {search_resp_json['result']}")
-                    tid = None
-            elif 'error' in search_resp_json:
-                message = search_resp_json["error"].get('message', 'Unknown error')
-                # logging.error(f"Invalid command line data: {message}")
-                logging.error(f"Invalid command line data: {session_resp.content}")
-                tid = None
-            else:
-                logging.error(f"Unexpected response structure: {search_resp_json}")
-                tid = None
-
-        except json.JSONDecodeError:
-            logging.error("Request response is not in JSON format")
-            logging.info(f"Full Response Content from check_session: {search_resp.content}")
-            tid = None
-        
-        return tid
-    
-        
-def logout():
-    global FORTI, session_cookie
-    request = {
-        "method": "exec",
-        "params": [
-            {
-                "url": "/sys/logout"
-            }
-        ],
-        "session": session_cookie,
-        "id": 5
-    }
-
-    try:
-        response = requests.post(FORTI, json=request, verify=False)
-        
-        if response.status_code != 200:
-            logging.error(f"API returned status code {response.status_code}")
-            logging.error(f"Response content: {response.text}")
-            return 
-
-    except Exception as e:
-        logging.error(f"Error in logout request: {str(e)}")
-        return 
-        
-    try:
-        resp_json = response.json()
-        if 'result' in resp_json and isinstance(resp_json['result'], list) and len(resp_json['result']) > 0:
-            if 'status' in resp_json['result'][0] and 'message' in resp_json['result'][0]['status']:
-                message = resp_json['result'][0]['status']['message']
-                if args.verbose:
-                    logging.info(f"Logout successful: {message}")
-            else:
-                logging.error("'status' or 'message' not found in the logout response")
-                logging.info(f"Full Response from check_session: {resp_json}")
-        else:
-            logging.error("'result' not found or not in expected format in the logout response")
-            logging.info(f"Full Response from check_session: {resp_json}")
-    except json.JSONDecodeError:
-        logging.error("Logout response is not in JSON format")
-        logging.info(f"Full Response Content from check_session: {response.content}")
-    
-    
-# Function to check if file modification time is greater than 24 hours ago
-def is_old_file(file_path):
-    if not os.path.exists(file_path):
-        return True  # File does not exist, so it's considered old
-    else:
-        # Get the modification time of the file
-        mod_time = os.path.getmtime(file_path)
-        # Calculate current time minus 24 hours
-        twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
-        # Convert modification time to datetime object
-        mod_time_dt = datetime.fromtimestamp(mod_time)
-        # Compare modification time with 24 hours ago
-        return mod_time_dt < twenty_four_hours_ago
-
-@log_function_details(relevant_globals=["session_cookie", "devtype", "ADOM_NAME"])        
-def list_logfiles():
-    
-    global  session_cookie, devtype
-    
-    FAZlogs = 'FAZlogs'
-    file_name = f'{devtype}.json'
-    file_path = os.path.join(FAZlogs, file_name)
-    
-    
-    # Check if the file is old or does not exist
-    if is_old_file(file_path):
-        # Call list_logfiles(args.st, args.et) if file is old or does not exist
-        session_cookie = get_session_cookie()
-        if not session_cookie:
-            sys.exit(1)
-        logging.info("Updating log files list from FAZ server.")
-    else:
-        logging.info(f"Skipping list_logfiles since '{file_path}' is recent.")
-        return
-        
-    devid = None
-    if devtype == 'FortiWeb':
-        devid = "FV-2KFTE22000040"
-    elif devtype == '"Fortigate"':
-        devid = 'FG181FTK22900868'
-        
-    body = {
-        "id": 5,
-        "jsonrpc": "2.0",
-        "method": "get",
-        "params": [
-            {
-                "apiver": 3,
-                "devid": devid,
-                "url": f"/logview/adom/{ADOM_NAME}/logfiles/state",
-                "vdom": "root"
-            }
-        ],
-        # "time-range": {"start": startTime, "end": endTime},
-        "session": session_cookie
-    }
-    
-    files_list = call_FAZ_API(body)
-    
-    if files_list:
-        files_list_json = files_list.json()
-        with open(file_path, 'w') as file:
-            file.write(json.dumps(files_list_json, indent=4))
-        # print(files_list.content)
-        
-
-
-# Assuming you have already defined ADOM_NAME, FORTI, and session_cookie
-def report_download_progress(filename, total_size, current_size):
-    progress = (current_size / total_size) * 100  # Cap at 100%
-    logging.info(f"Downloading {filename}: {progress:.2f}% complete")
-    if current_size >= total_size:
-        logging.info(f"Download of {filename} completed.")
-
-
-def get_log_file(filename, fsize, device_id, vdom, max_bytes=None):
-    global session_cookie
-    offset = 0
-    
-    if max_bytes:
-        chunk_size = max_bytes
-    else:
-        chunk_size = 52428800  # Maximum length
-    
-    total_size = int(fsize)  # Assuming 'fsize' is available from the file info
-    all_content = b""
-    
-    
-    while True:
         body = {
-            "id": 5,
+            "id": 2,
             "jsonrpc": "2.0",
-            "method": "get",
-            "params": [
-                {
-                    "url": f"/logview/adom/{ADOM_NAME}/logfiles/data",
-                    "devid": device_id,
-                    "vdom": vdom,
-                    "filename": filename,
-                    "data-type": "csv/gzip/base64",
-                    "offset": offset,
-                    "length": chunk_size,
-                    "apiver": 3
-                }
-            ],
-            "session": session_cookie
-        }
-        
-        response = call_FAZ_API(body)
-        
-        if response is None:
-            logging.error(f"Failed to retrieve content for {filename}")
-            return None
-        data = response.json()
-        
-        if 'result' not in data or not data['result']['data']:
-            logging.warning(json.dumps(data, indent=4))
-            return None
-        content = data['result']['data']
-        decoded_content = base64.b64decode(content)
-        decompressed_content = gzip.decompress(decoded_content)
-        
-        all_content += decompressed_content
-        
-        if data['result']['length'] > chunk_size:
-            offset +=  chunk_size
-        else:
-            offset = total_size
-        # print(total_size, ': ', data['result']['length'])
-        # Report progress
-        report_download_progress(filename, total_size, offset)
-        
-        if offset >= total_size:
-            break
-    
-    try:
-        return all_content.decode('utf-8')
-    except UnicodeDecodeError:
-        logging.warning(f"UTF-8 decoding failed for {filename}, trying ISO-8859-1")
-        return all_content.decode('iso-8859-1')
-
-   
-# @log_function_details(relevant_globals=["idx_asc", "header_written"])
-class FieldSurveyor:
-    def __init__(self):
-        self.field_dic = {}
-
-    def process(self, results_resp_json):
-        data = results_resp_json["result"]["data"]
-        for data_dict in data:
-            for key, value in data_dict.items():
-                if value is not None and value != 0 and value != "" and value != 'N/A' and value != 'undefined' \
-                and 'Reserved' not in value and key != 'srcport' and key != 'src_port':
-                    if key not in self.field_dic:
-                        self.field_dic[key] = set()
-                    self.field_dic[key].add(value)
-
-    def get_survey_results(self):
-        return [key for key, unique_values in self.field_dic.items() if len(unique_values) > 1]
-
-def survey_fields(tids, total_queries):
-    field_surveyor = FieldSurveyor()
-    
-    # Initialize progress tracker
-    initialize_progress_tracker(total_queries)
-
-    total = asyncio.run(fetchlogs.fetch_search_results(tids, total_queries, lambda results_resp_json: field_surveyor.process(results_resp_json)))
-
-    logging.info(f"Total results processed: {total}")
-
-    for tid in tids:
-        FAZapi.FAZapi.close_tid(tid)
-
-    return field_surveyor.get_survey_results()
-
-
-@log_function_details(relevant_globals=["args.logtype",  "args.st", "args.et"])
-async def list_fields():
-    global args
-
-    async with aiohttp.ClientSession() as session:
-    
-        validate = check_session(args.st, args.et)
-        
-        if validate and validate == -11:
-            
-            session_cookie = get_session_cookie()
-            asyncio.run(list_fields())
-            
-        tid = FAZapi.search_request(args.logtype, '', args.st, args.et)
-
-        if tid:
-            try:
-                results_resp_json = await FAZapi.search_request_status(session, tid, 0, 1)
-
-                if results_resp_json.get('result', {}).get('data', []):
-                    data = results_resp_json["result"]['data']
-                    print_to_console(f"Available fields for VDOM {args.adom}: {json.dumps(results_resp_json, indent=4)}")
-
-            except KeyError as e:
-                if "error" in results_resp_json:
-                    logging.error(f"{results_resp_json['error']['message']}")
-                else:
-                    logging.error(f"Unexpected response structure: {results_resp_json}")
-                raise
-            except Exception as e:
-                logging.error(f"Error occurred during search_request_status: {str(e)}")
-                raise
-        
-        FAZapi.FAZapi.close_tid(tid)
-        
-        
-def logfields(logtype):
-
-    body2 = {
-        "id": 4,
-        "jsonrpc": "2.0",
-        "method": "get",
-        "params": [
-            {
-                "apiver": 3,
-                "devtype": devtype,
-                "logtype": logtype,
-                "url": f"/logview/adom/{ADOM_NAME}/logfields"
-            }
-        ],
-        "session": session_cookie,
-    }
-
-    
-    fields = call_FAZ_API(body2)
-    
-    if fields:
-        return fields.json()
-
-        
-@log_function_details(relevant_globals=['FORTI', "ADOM_NAME", "devid", "session_cookie"])
-def search_request(logtype, query, startTime, endTime, time_order = 'desc'):
-    global session_cookie
-    """
-    Starts a log search request with the given query and time range.
-    
-    Args:
-        query (str): The search query.
-        startTime (str): The start time in 'YYYY-MM-DD HH:MM' format.
-        endTime (str): The end time in 'YYYY-MM-DD HH:MM' format.
-        
-    Returns:
-        str: The task ID (tid) of the search request, or None if an error occurs.
-    """
-    
-    global ADOM_NAME, devid, session_cookie
-
-    body2 = {
-        "id": 2,
-        "jsonrpc": "2.0",
-        "method": "add",
-        "params": [
-            {
-                "apiver": 3,
-                "filter": query,
-                "logtype": logtype,
-                "device": [{"devid": devid}],
-                "time-order": time_order,
-                "time-range": {"start": startTime, "end": endTime},
-                "url": f"/logview/adom/{ADOM_NAME}/logsearch",
-            }
-        ],
-        "session": session_cookie,
-    }
-
-    # Make the request to start the log search
-    
-    search_resp = call_FAZ_API(body2)
-    
-    try:
-        search_resp_json = search_resp.json()
-        # print(json.dumps(search_resp_json, indent=4))
-
-        if 'result' in search_resp_json and 'tid' in search_resp_json['result']:
-            tid = search_resp_json["result"]["tid"]
-            # elif search_resp_json["result"][0]["status"]["code"] == -11:
-                # logging.info(f"Session cookie expired: {search_resp_json['result'][0]['status']['message']}")
-                # tid = -11
-                
-        elif 'error' in search_resp_json:
-            # message = search_resp_json["error"][0]['message']
-            message = search_resp_json["error"]['message']
-            print(f"Invalid command line data: {message}")
-            tid = None
-            
-        else:
-            # logging.error("'tid' key not found in the search response")
-            logging.error(f"Full Response from search_request: {search_resp_json}")
-            tid = None
-    except json.JSONDecodeError:
-        logging.error("Search response is not in JSON format")
-        logging.info(f"Full Response Content from search_request: {search_resp.content}")
-        tid = None
-    
-    return tid
-
-
-@log_function_details(relevant_globals=['FORTI', 'ADOM_NAME', 'session_cookie'])
-def close_search_request(tid):
-    body2 = {
-        "id": 2,
-        "jsonrpc": "2.0",
-        "method": "delete",
-        "params": [
-            {
-                "apiver": "3",
-                "url": f"/logview/adom/{ADOM_NAME}/logsearch/{tid}"
-            }
-        ],
-        "session": session_cookie,
-    }
-    
-    try:
-        close_resp = call_FAZ_API(body2)
-        
-        if close_resp is None:
-            logging.error(f"Failed to get response from FAZ API for TID: {tid}")
-            return None
-
-        close_resp_json = close_resp.json()
-        
-        if 'result' in close_resp_json and 'status' in close_resp_json['result']:
-            status = close_resp_json['result'].get('status', {})
-            message = status.get('message')
-            if message:
-                return message
-            else:
-                logging.warning(f"No status message found in the response for TID: {tid}")
-                return None
-        elif 'error' in close_resp_json:
-            error_message = close_resp_json['error'].get('message', 'Unknown error')
-            error_code = close_resp_json['error'].get('code', 'Unknown code')
-            logging.error(f"Server returned an error for TID {tid}. Code: {error_code}, Message: {error_message}")
-            return f"Error: {error_message}"
-        else:
-            logging.error(f"Unexpected response structure for TID: {tid}")
-            logging.info(f"Full Response from close_search_request: {close_resp_json}")
-            return None
-
-    except json.JSONDecodeError:
-        logging.error(f"Closing search request {tid} response is not in JSON format")
-        logging.info(f"Full Response Content from close_search_request: {close_resp.content}")
-        return None
-    except Exception as e:
-        logging.error(f"Unexpected error in close_search_request for TID {tid}: {str(e)}")
-        return None
-
-
-def close_tid(tid):
-    if tid is None:
-        logging.warning("Attempted to close None TID, skipping.")
-        return
-
-    try:
-        status = close_search_request(tid)
-        if status == "succeeded":
-            if args.verbose:
-                logging.info(f"Search request {tid} closed successfully.")
-        elif status is None:
-            logging.warning(f"Failed to close search request {tid}. No status returned.")
-        elif status.startswith("Error:"):
-            logging.warning(f"Failed to close search request {tid}. {status}")
-        else:
-            logging.warning(f"Unexpected status when closing search request {tid}. Status: {status}")
-    except Exception as e:
-        logging.error(f"Failed to close search request {tid}: {str(e)}")
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-@log_function_details(relevant_globals=["ADOM_NAME", "FORTI", "session_cookie", "args"])
-async def search_request_status(session, tid, offset, limit=1000):
-    global ADOM_NAME, FORTI, session_cookie, args
-    progress = 0
-    stuck_iterations = 0
-    max_stuck_iterations = 50  # Reduced to detect stalling faster
-    last_progress = -1
-    start_time = asyncio.get_event_loop().time()
-        
-    timeout = float(args.timeout)  # default: 5 minutes timeout
-
-    while progress < 100:
-        current_time = asyncio.get_event_loop().time()
-        if current_time - start_time > timeout:
-            logging.warning(f"Timeout reached for TID {tid} and offset {offset}. Total time: {current_time - start_time:.2f}s")
-            logging.info(f"Try again with timeout > the current timeout: (timeout={timeout}).")
-            break
-
-        body3 = {
-            "id": 3,
-            "jsonrpc": "2.0",
-            "method": "get",
+            "method": "add",
             "params": [
                 {
                     "apiver": 3,
-                    "limit": limit,
-                    "offset": offset,
-                    "url": f"/logview/adom/{ADOM_NAME}/logsearch/{tid}"
+                    "filter": "",
+                    "logtype": "traffic",
+                    "device": [{"devid": self.devid}],
+                    "time-order": 'desc',
+                    "limit": 1,  # Only need one record to check session
+                    "time-range": {"start": startTime, "end": endTime},
+                    "url": f"/logview/adom/{self.adom_name}/logsearch",
                 }
             ],
-            "session": session_cookie,
+            "session": self.session_cookie,
         }
 
         try:
-            async with session.post(FORTI, json=body3, ssl=False, timeout=60) as response:
+            session_resp = self.call_FAZ_API(body)
+            if not session_resp:
+                logger.error("Failed to connect to FortiAnalyzer. Please try again later")
+                logger.debug("Failed to get response for session check")
+
+                sys.exit(1)
+
+            search_resp_json = session_resp.json()
+
+            # Check for session expiration
+            if 'result' in search_resp_json and isinstance(search_resp_json['result'], list):
+                result = search_resp_json['result'][0]
+                if 'status' in result and 'code' in result['status']:
+                    if result['status']['code'] == -11:
+                        logger.info("Session expired. Re-authentication required.")
+                        return -11
+
+                    # Return the task ID or appropriate value
+                    return result.get("tid")
+
+            # Handle dictionary result case
+            elif 'result' in search_resp_json and isinstance(search_resp_json['result'], dict):
+                return search_resp_json["result"].get("tid")
+
+            # Handle error case
+            elif 'error' in search_resp_json:
+                message = search_resp_json["error"].get('message', 'Unknown error')
+                logger.error(f"API error: {message}")
+                return None
+
+            # Unexpected structure
+            else:
+                logger.error(f"Unexpected response structure: {search_resp_json}")
+                return None
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON response: {str(e)}")
+            if session_resp:
+                logger.debug(f"Response content: {session_resp.text[:200]}...")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in session check: {str(e)}")
+            return None
+
+    def logout(self):
+        """
+        Logs out from the FortiAnalyzer API and cleans up the session file.
+
+        Returns:
+            bool: True if logout was successful, False otherwise.
+        """
+        if not self.session_cookie:
+            logger.debug("No active session to logout from")
+            return True
+
+        request = {
+            "method": "exec",
+            "params": [
+                {
+                    "url": "/sys/logout"
+                }
+            ],
+            "session": self.session_cookie,
+            "id": 5
+        }
+
+        try:
+            response = requests.post(self.base_url, json=request, verify=False)
+            self.session_cookie = None  # Clear the session even if the request fails
+
+            # Clean up the session file
+            if os.path.exists('session.key'):
                 try:
-                    text = await response.text(encoding='utf-8')
-                    results_resp_json = json.loads(text)
-                except UnicodeDecodeError as e:
-                    logging.warning(f"UnicodeDecodeError: {e}, trying iso-8859-1 encoding")
+                    os.remove('session.key')
+                    logger.debug("Session file removed")
+                except Exception as e:
+                    logger.error(f"Error removing session file: {str(e)}")
+
+            # Check response
+            if response.status_code != 200:
+                logger.error(f"API returned status code {response.status_code}")
+                logger.debug(f"Response content: {response.text[:200]}...")
+                return False
+
+            resp_json = response.json()
+            if 'result' in resp_json and isinstance(resp_json['result'], list):
+                result = resp_json['result'][0]
+                if 'status' in result and 'message' in result['status']:
+                    logger.debug(f"Logout successful: {result['status']['message']}")
+                    return True
+
+            logger.warning("Unexpected response format during logout")
+            return True  # Session is cleared locally even if response is unexpected
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Error decoding JSON response: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Error in logout request: {str(e)}")
+            return False
+
+    async def call_FAZ_API_async(self, body: Dict, session: Optional[aiohttp.ClientSession] = None) -> Dict:
+        """
+        Make an async request to the FortiAnalyzer API.
+
+        Args:
+            body: Request body
+            session: Optional existing aiohttp ClientSession
+
+        Returns:
+            Dict: Response data or None on error
+        """
+        own_session = False
+        if session is None:
+            session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=self.max_connections, ssl=False))
+            own_session = True
+
+        try:
+            async with session.post(
+                    self.base_url,
+                    json=body,
+                    ssl=False,
+                    timeout=self.connection_timeout
+            ) as response:
+                if response.status != 200:
+                    logger.error(f"API returned status code {response.status}")
+                    return None
+
+                text = await response.text(encoding='utf-8')
+                try:
+                    return json.loads(text)
+                except json.JSONDecodeError:
+                    logger.error("Response is not in valid JSON format")
+                    return None
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Error making async request to FortiAnalyzer: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in call_FAZ_API_async: {str(e)}")
+            return None
+        finally:
+            if own_session:
+                await session.close()
+
+    def call_FAZ_API(self, body: Dict) -> Optional[requests.Response]:
+        """
+        Make a synchronous request to the FortiAnalyzer API.
+
+        Args:
+            body: Request body
+
+        Returns:
+            requests.Response or None on error
+        """
+        try:
+            # Use a session with connection pooling for better performance
+            with requests.Session() as session:
+                session.verify = False
+                session.headers.update({
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                })
+
+                response = session.post(
+                    self.base_url,
+                    json=body,
+                    timeout=self.connection_timeout
+                )
+                response.raise_for_status()
+                return response
+
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Error making request to FortiAnalyzer: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"call_FAZ_API: {str(e)}")
+            return None
+
+    def _get_request_body(self, method: str, params: List[Dict]) -> Dict:
+        """
+        Create a request body with cached templates for better performance.
+
+        Args:
+            method: API method (add, get, delete)
+            params: Parameters for the request
+
+        Returns:
+            Dict: Request body
+        """
+        # Add this check at the beginning of the method
+        if not hasattr(self, '_request_body_cache') or self._request_body_cache is None:
+            self._request_body_cache = {}
+        # Create a cache key based on the method
+        cache_key = method
+
+        if cache_key not in self._request_body_cache:
+            # Create the base request body and cache it
+            self._request_body_cache[cache_key] = {
+                "id": hash(method) % 1000,  # Use a deterministic ID
+                "jsonrpc": "2.0",
+                "method": method
+            }
+
+        # Create a copy of the cached body and add dynamic parts
+        body = self._request_body_cache[cache_key].copy()
+        body["params"] = params
+        body["session"] = self.session_cookie
+
+        return body
+
+    async def refresh_session_if_needed(self, session: aiohttp.ClientSession) -> bool:
+        """
+        Check and refresh the session cookie if expired.
+
+        Args:
+            session: aiohttp ClientSession
+
+        Returns:
+            bool: True if session is valid, False otherwise
+        """
+        # This would need to be implemented based on your session handling logic
+        # Placeholder for the concept
+        async with self.session_lock:
+            if self.session_cookie is None:
+                # Refresh session logic would go here
+                self.get_session_cookie()
+                return self.session_cookie is not None
+            return True
+
+    def search_request(self, time_order: str = 'desc') -> Optional[str]:
+        """
+        Start a log search request with the given parameters.
+
+        Args:
+            time_order: Order of results by time ('desc' or 'asc')
+
+        Returns:
+            str: Task ID (tid) or None on error
+        """
+        params = [{
+            "apiver": 3,
+            "filter": self.query,
+            "logtype": self.logtype,
+            "device": [{"devid": self.devid}],
+            "time-order": time_order,
+            "time-range": {"start": self.startTime, "end": self.endTime},
+            "url": f"/logview/adom/{self.adom_name}/logsearch",
+        }]
+
+        body = self._get_request_body("add", params)
+        search_resp = self.call_FAZ_API(body)
+
+        if not search_resp:
+            return None
+
+        try:
+            search_resp_json = search_resp.json()
+
+            if 'result' in search_resp_json and 'tid' in search_resp_json['result']:
+                return search_resp_json["result"]["tid"]
+            elif 'error' in search_resp_json:
+                message = search_resp_json["error"].get('message', 'Unknown error')
+                print_to_console(f"Invalid command line data: {message}")
+                return None
+            else:
+                logger.error(f"Unexpected response structure: {search_resp_json}")
+                return None
+
+        except json.JSONDecodeError:
+            logger.error("Search response is not in JSON format")
+            return None
+
+    def close_search_request(self, tid: str) -> Optional[str]:
+        """
+        Close a search request by its task ID.
+
+        Args:
+            tid: Task ID to close
+
+        Returns:
+            str: Status message or None on error
+        """
+        params = [{
+            "apiver": "3",
+            "url": f"/logview/adom/{self.adom_name}/logsearch/{tid}"
+        }]
+
+        body = self._get_request_body("delete", params)
+        close_resp = self.call_FAZ_API(body)
+
+        if not close_resp:
+            return None
+
+        try:
+            close_resp_json = close_resp.json()
+            if 'result' in close_resp_json and 'status' in close_resp_json['result']:
+                return close_resp_json["result"]["status"]["message"]
+            else:
+                return None
+
+        except json.JSONDecodeError:
+            logger.error(f"Closing search request {tid} response is not in JSON format")
+            return None
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def search_request_status(self, session: aiohttp.ClientSession, tid: str,
+                                    offset: int = 0, limit: int = 1000) -> Dict:
+        """
+        Check the status of a search request.
+
+        Args:
+            session: aiohttp ClientSession
+            tid: Task ID to check
+            offset: Result offset
+            limit: Maximum number of results to return
+
+        Returns:
+            Dict: Response data
+        """
+        # Add this check at the beginning of the method
+        if not hasattr(self, '_request_body_cache') or self._request_body_cache is None:
+            self._request_body_cache = {}
+        start_time = asyncio.get_event_loop().time()
+        progress = 0
+        stuck_iterations = 0
+        max_stuck_iterations = 50  # Detect stalling faster
+        last_progress = -1
+
+        while progress < 100:
+            # Check timeout
+            if asyncio.get_event_loop().time() - start_time > self.timeout:
+                logger.warning(f"Timeout reached for TID {tid} and offset {offset}.")
+                break
+
+            # Ensure session is valid
+            if not await self.refresh_session_if_needed(session):
+                logger.error("Failed to refresh session")
+                raise Exception("Session refresh failed")
+
+            params = [{
+                "apiver": 3,
+                "limit": limit,
+                "offset": offset,
+                "url": f"/logview/adom/{self.adom_name}/logsearch/{tid}"
+            }]
+
+            body = self._get_request_body("get", params)
+
+            try:
+                # More efficient to use json parameter directly
+                async with session.post(self.base_url, json=body, ssl=False, timeout=60) as response:
                     try:
+                        # Try to decode as UTF-8 first
+                        text = await response.text(encoding='utf-8')
+                        results_resp_json = json.loads(text)
+                    except UnicodeDecodeError:
+                        # Fall back to ISO-8859-1 if UTF-8 fails
+                        logger.warning("UnicodeDecodeError with UTF-8, trying ISO-8859-1")
                         text = await response.text(encoding='iso-8859-1')
                         results_resp_json = json.loads(text)
-                    except Exception as e:
-                        logging.error(f"Error decoding response: {e}")
-                        raw_content = await response.read()
-                        logging.info(f"Raw response content: {raw_content}")
+
+                    # Check progress
+                    try:
+                        progress = results_resp_json["result"]["percentage"]
+
+                        # Handle stuck progress
+                        if progress == last_progress:
+                            stuck_iterations += 1
+                            if stuck_iterations >= max_stuck_iterations:
+                                logger.warning(f"Progress stuck at {progress}% for TID {tid}. Breaking out of loop.")
+                                break
+                        else:
+                            stuck_iterations = 0
+                            last_progress = progress
+
+                    except KeyError:
+                        if "error" in results_resp_json:
+                            logger.error(f"API error: {results_resp_json['error'].get('message', 'Unknown error')}")
+                        else:
+                            logger.error(f"Unexpected response structure for TID {tid}")
                         raise
-                except json.JSONDecodeError as e:
-                    logging.error(f"JSONDecodeError: {e}")
-                    logging.info(f"Full Response Content: {text}")
-                    raise
 
-                try:
-                    progress = results_resp_json["result"]["percentage"]
-                    
-                    if progress == last_progress:
-                        stuck_iterations += 1
-                        logging.debug(f"Progress stuck at {progress}% for {stuck_iterations} iterations.")
-                        if stuck_iterations >= max_stuck_iterations:
-                            logging.debug(f"Progress stuck at {progress}% for TID {tid} and offset {offset}. Breaking out of loop.")
-                            break
-                    else:
-                        stuck_iterations = 0
-                        last_progress = progress
-                    
-                    logging.debug(f"Progress for TID {tid} and offset {offset}: {progress}%")
-                    
-                    if progress == 100:
-                        logging.debug(f"Reached 100% progress for TID {tid} and offset {offset}.")
-                        break
-                        
-                except KeyError as e:
-                    if "error" in results_resp_json:
-                        logging.error(f"Error in response: {results_resp_json['error']['message']}")
-                        logging.info(f"Full Response Content: {json.dumps(results_resp_json, indent=4)}")
-                    else:
-                        logging.error(f"Unexpected response structure for TID {tid} and offset {offset}: {str(e)}")
-                    raise
+            except (aiohttp.ClientResponseError, aiohttp.ClientError) as e:
+                logger.error(f"Network error for TID {tid}: {str(e)}")
+                raise
 
-        except aiohttp.ClientResponseError as e:
-            logging.error(f"HTTP error for TID {tid} and offset {offset}: {e.status}")
-            raise
-        except aiohttp.ClientError as e:
-            logging.warning(f"Network error for TID {tid} and offset {offset}: {str(e)}")
-            raise
-        except Exception as e:
-            logging.error(f"Unexpected error in search_request_status: {str(e)}")
-            raise
+            # Use exponential backoff with jitter
+            delay = 1 + (stuck_iterations * 0.2)
+            await asyncio.sleep(min(delay, 5))  # Cap at 5 seconds
 
-        await asyncio.sleep(2)  # Add a small delay between requests
+        return results_resp_json
 
-    logging.debug(f"Exiting loop for TID {tid} and offset {offset}. Final progress: {progress}%")
-    return results_resp_json
-    
+    async def fetch_search_results(self, tids: List[str], total_queries: int,
+                                   result_processor: Callable) -> int:
+        """
+        Optimized version using producer-consumer pattern with bounded semaphore.
 
-           
-@log_function_details(relevant_globals=["args.logtype"])
-async def start_idx():
-    global args
+        Args:
+            tids: List of task IDs to fetch results for
+            total_queries: Total number of queries being processed
+            result_processor: Function to process the results
 
-    async with aiohttp.ClientSession() as session:
-        idx_asc = 0
+        Returns:
+            int: Total number of results fetched
+        """
+        if not tids:
+            logger.warning("No task IDs provided to fetch_search_results")
+            return 0
 
-        tid2 = search_request(args.logtype, '', args.st, args.et, 'asc')
-        
-        if tid2:
+        # Shared state
+        total = 0
+        results_lock = asyncio.Lock()
+        semaphore = asyncio.Semaphore(min(20, len(tids) * 2))  # Bounded concurrency
+        active_tids = set(tids)
+        processed_cache = {}  # Track processed (tid, offset) pairs
+
+        # Initialize progress tracking
+        progress_tracker = ProgressTracker(self.scale)
+
+        # Task tracking for faster completion detection
+        pending_tasks = set()
+
+        async def process_chunk(session: aiohttp.ClientSession, tid: str, offset: int):
+            """Process a single chunk of results."""
+            nonlocal total
+
+            # Check if already processed
+            cache_key = (tid, offset)
+            if cache_key in processed_cache:
+                return
+
+            processed_cache[cache_key] = True
+
             try:
-                    
-                results_resp_json = await search_request_status(session, tid2, 0, 1)
+                # Get results with retry logic
+                results = await self.search_request_status(session, tid, offset)
 
-                if results_resp_json.get('result', {}).get('data', []):
-                    idx_asc = results_resp_json["result"]['data'][0]['id']
-                    
-                close_tid(tid2)
-        
-                # total_logs = int(idx_desc) - int(idx_asc)
-                
-                logging.debug(f"Start logs index in the given time range: {idx_asc}") 
-                # logging.debug(f"Last logs index in the given time range: {idx_desc}") 
-                    
-                    
-            except KeyError as e:
-                if "error" in results_resp_json:
-                    logging.error(f"{results_resp_json['error']['message']}")
-                else:
-                    logging.error(f"Unexpected response structure: {results_resp_json}")
-                idx_asc = None
-                raise
+                data = results.get('result', {}).get('data', [])
+                if not data:
+                    # No data in this chunk
+                    if tid in active_tids:
+                        active_tids.remove(tid)
+                        # progress_tracker.next_query()
+                        self.close_tid(tid)
+                        if total == 0:
+                            logger.debug(f"No logs found for TID {tid}")
+                    return
+
+                # Process the results
+                query_index = tids.index(tid)
+                try:
+                    # Apply result processor
+                    result_processor(results)
+
+                    # Update progress
+                    progress_tracker.update_progress(data)
+
+                    # Update total count
+                    return_lines = results["result"]["return-lines"]
+                    async with results_lock:
+                        total += return_lines
+
+                    # Schedule next chunk if needed
+                    if return_lines == 1000:
+                        task = asyncio.create_task(
+                            bounded_process_chunk(session, tid, offset + return_lines)
+                        )
+                        pending_tasks.add(task)
+                        task.add_done_callback(pending_tasks.discard)
+                    else:
+                        # This TID is complete
+                        if tid in active_tids:
+                            active_tids.remove(tid)
+                            # progress_tracker.next_query()
+                            self.close_tid(tid)
+
+                except Exception as e:
+                    logger.error(f"Error processing results for TID {tid}: {e}")
+
             except Exception as e:
-                logging.error(f"Error occurred during search_request_status: {str(e)}")
+                logger.error(f"Error fetching results for TID {tid}, offset {offset}: {e}")
+
+        async def bounded_process_chunk(session, tid, offset):
+            """Process a chunk with concurrency control."""
+            async with semaphore:
+                await process_chunk(session, tid, offset)
+
+        async with aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(limit=self.max_connections, ssl=False),
+                timeout=aiohttp.ClientTimeout(total=self.timeout * 1.5)
+        ) as session:
+            # Start initial processing for each TID
+            for tid in tids:
+                task = asyncio.create_task(bounded_process_chunk(session, tid, 0))
+                pending_tasks.add(task)
+                task.add_done_callback(pending_tasks.discard)
+
+            # Wait for all tasks to complete
+            while pending_tasks:
+                done, _ = await asyncio.wait(
+                    pending_tasks,
+                    timeout=5,  # Check periodically to handle new tasks
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Early exit if no more active TIDs
+                if not active_tids and not pending_tasks:
+                    break
+        progress_tracker.finish()
+        return total
+
+    def close_tid(self, tid: str) -> None:
+        """
+        Close a task by its ID.
+
+        Args:
+            tid: Task ID to close
+        """
+        if tid is None:
+            logger.warning("Attempted to close None TID, skipping.")
+            return
+
+        try:
+            status = self.close_search_request(tid)
+            if status == "succeeded":
+                logger.debug(f"Search request {tid} closed successfully.")
+            else:
+                logger.warning(f"Failed to close search request {tid}. Status: {status}")
+        except Exception as e:
+            logger.error(f"Error closing search request {tid}: {str(e)}")
+
+    # Method to batch process multiple TIDs in parallel
+    async def batch_process_tids(self, queries: List[Dict],
+                                 result_processor: Callable) -> Dict[str, int]:
+        """
+        Process multiple queries in parallel batches.
+
+        Args:
+            queries: List of query dictionaries
+            result_processor: Function to process results
+
+        Returns:
+            Dict: Mapping of query identifiers to result counts
+        """
+        results = {}
+
+        # Create all TIDs first
+        tids = []
+        for query in queries:
+            # Set temporary query parameters
+            orig_query = self.query
+            orig_st = self.startTime
+            orig_et = self.endTime
+
+            try:
+                self.query = query.get('filter', self.query)
+                self.startTime = query.get('start', self.startTime)
+                self.endTime = query.get('end', self.endTime)
+
+                tid = self.search_request()
+                if tid:
+                    tids.append((tid, query.get('id', str(len(tids)))))
+            finally:
+                # Restore original parameters
+                self.query = orig_query
+                self.startTime = orig_st
+                self.endTime = orig_et
+
+        # Process all TIDs in batches
+        batch_size = min(5, len(tids))
+        for i in range(0, len(tids), batch_size):
+            batch = tids[i:i + batch_size]
+            batch_tids = [t[0] for t in batch]
+            batch_ids = [t[1] for t in batch]
+
+            # Create a result processor that tracks which query produced which results
+            batch_results = {}
+
+            def batch_processor(results_json):
+                tid = results_json.get('tid')
+                if tid:
+                    idx = batch_tids.index(tid) if tid in batch_tids else -1
+                    if idx >= 0:
+                        query_id = batch_ids[idx]
+                        # Call original processor with query ID context
+                        result_processor(results_json, query_id)
+
+            total = await self.fetch_search_results(batch_tids, len(batch_tids), batch_processor)
+
+            # Record results for this batch
+            for tid, query_id in zip(batch_tids, batch_ids):
+                results[query_id] = total / len(batch_tids)  # Estimate
+
+        return results
+
+    async def calculate_scale(self, retry_count=0, max_retries=3) -> Optional[int]:
+        """Get the scale (difference between descending and ascending log indices) in the given time range.
+
+        Implements retry logic with a maximum of 3 attempts if calculation fails.
+
+        Returns:
+            Optional[int]: Scale value if successful, None otherwise
+        """
+        if retry_count >= max_retries:
+            logger.error(f"Failed to calculate scale after {max_retries} attempts")
+            return None
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Get ascending index
                 idx_asc = None
-                raise
-        else:
-            logging.error(f"Failed to calculate total logs.")
-            
-    return idx_asc
+                tid_asc = self.search_request('asc')
+                if not tid_asc:
+                    logger.error("Failed to create ascending search request")
+                else:
+                    try:
+                        results_resp_asc = await self.search_request_status(session, tid_asc)
+                        if results_resp_asc.get('result', {}).get('data', []):
+                            idx_asc = results_resp_asc["result"]['data'][0]['id']
+                            logger.debug(f"Start logs index (ascending): {idx_asc}")
+                        else:
+                            logger.info("No data found in ascending search results")
+                            # Early exit on this specific warning
+                            sys.exit(0)
+                    except KeyError:
+                        if "error" in results_resp_asc:
+                            logger.error(f"Ascending search error: {results_resp_asc['error']['message']}")
+                        else:
+                            logger.error(f"Unexpected ascending response structure: {results_resp_asc}")
+                    except Exception as e:
+                        logger.error(f"Error in ascending search: {str(e)}")
+                    finally:
+                        if tid_asc:
+                            self.close_tid(tid_asc)
+
+                # Get descending index
+                idx_desc = None
+                tid_desc = self.search_request('desc')
+                if not tid_desc:
+                    logger.error("Failed to create descending search request")
+                else:
+                    try:
+                        results_resp_desc = await self.search_request_status(session, tid_desc)
+                        if results_resp_desc.get('result', {}).get('data', []):
+                            idx_desc = results_resp_desc["result"]['data'][0]['id']
+                            logger.debug(f"End logs index (descending): {idx_desc}")
+                        else:
+                            logger.info("No data found in descending search results")
+                            # Early exit on this specific warning
+                            sys.exit(0)
+                    except KeyError:
+                        if "error" in results_resp_desc:
+                            logger.error(f"Descending search error: {results_resp_desc['error']['message']}")
+                        else:
+                            logger.error(f"Unexpected descending response structure: {results_resp_desc}")
+                    except Exception as e:
+                        logger.error(f"Error in descending search: {str(e)}")
+                    finally:
+                        if tid_desc:
+                            self.close_tid(tid_desc)
+
+                # Calculate scale if both indices are available
+                if idx_asc is not None and idx_desc is not None:
+                    try:
+                        scale = int(idx_desc) - int(idx_asc)
+                        if scale >= 0:
+                            return scale
+                        else:
+                            logger.warning(f"Negative scale calculated: {scale}")
+                            logger.info(f"idx_desc = {idx_desc}, idx_asc = {idx_asc}")
+                            # Retry with recursive call
+                            return await self.calculate_scale(retry_count + 1, max_retries)
+                    except ValueError as e:
+                        logger.error(f"Error converting indices to integers: {str(e)}")
+
+            # If we get here, something failed
+            logger.warning(f"Retrying calculate_scale (attempt {retry_count + 1}/{max_retries})")
+            return await self.calculate_scale(retry_count + 1, max_retries)
+
+        except Exception as e:
+            logger.error(f"Unexpected error in calculate_scale: {str(e)}")
+            return await self.calculate_scale(retry_count + 1, max_retries)
 
 
-#****************************************************************************
-#                       Execution
-#****************************************************************************
-def init_session():
-    global session_cookie
-    if not session_cookie:
-        session_cookie = get_session_cookie()
+    # def search(self, output_type: str, whitelist_ips: List[str] = None) -> int:
+    def search(self, callback) -> int:
+        # Initialize the log printer
+        # log_printer = ResultsPrinter()
+        #
+        # # Create a callback function that uses the log_printer
+        # def callback(results_resp_json):
+        #     log_printer.print_logs(
+        #         results_resp_json,
+        #         self.fields,
+        #         output_type,
+        #         whitelist_ips,
+        #         self.adom_name
+        #     )
 
-def fazapi(params):
+        # Generate search requests and filter valid ones
+        tids = []
+        for _ in range(10):
+            tid = self.search_request()
+            if tid is not None and tid != -11:
+                tids.append(tid)
 
-    global FORTI, devid, ADOM_NAME, devtype, is_redirected, args, session_cookie
-    
-    args = params
-    
-    # Set up logging with more informative format
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    
-    setup_colored_logging(level=logging.INFO)
-    
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+        # Run the async function in a new event loop
+        total = asyncio.run(self.fetch_search_results(tids, len(tids), callback))
 
-        DEBUG_MODE = True  
-        
-    is_redirected = not sys.stdout.isatty()
-    
-    # Read configuration from JSON file
-    file_path = 'FazLog-config.json'
-    data = read_json(file_path)
-    if not data:
-        logging.error("Failed to read configuration file")
-        return
+        return total
 
-    # Extract information from JSON
-    logging.debug(f"Extracting information for ADOM type: {args.adom}")
-    FORTI, devid, ADOM_NAME, devtype, fields = extract_info(data)
-
-
-        
-    if not all([FORTI, devid, ADOM_NAME, devtype]):
-        logging.error("Failed to extract all required information from configuration")
-        return    
-
-        # logging.debug(f"Successfully extracted information for ADOM type: {args.adom}")
-        # logging.info(f"FortiFaz: {FORTI}")
-        # logging.info(f"ADOM_NAME: {ADOM_NAME}")
-        # logging.info(f"Log Type: {args.logtype}")
-
-
-    # Disable warnings for unverified HTTPS requests
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
-    session_cookie = get_session_cookie()
-    
-    return FORTI, devid, ADOM_NAME, devtype, fields 
-
-            

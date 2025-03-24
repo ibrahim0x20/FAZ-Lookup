@@ -2,27 +2,43 @@
 import sys
 import os
 import argparse
-import logging
 from colorama import init, Fore, Style
-from tenacity import retry, stop_after_attempt, wait_exponential
 from datetime import datetime
 import re
 import time
 import asyncio
-import aiohttp
-import urllib
-# import threading
-import multiprocessing
 import subprocess
 import json
 import sqlite3
-
-from color_logging import setup_colored_logging
-import FAZapi
-import FAZsqlite
-import fetchlogs
 import ipaddress
+import signal
 
+from spnego import client
+
+from hadi_logger import get_logger
+
+# Centralized logger initialization
+logger = get_logger(
+    module_name=__name__,
+    log_file=os.getenv("HADI_LOG_FILE", os.path.join("logs", "hadi-ir.log")),
+    debug_mode=False  # Default to False, will be updated with command line args
+)
+
+from FAZapi import FAZapi
+from helpers import *
+from helpers import ConfigManager
+
+
+# Define a signal handler
+def signal_handler(sig, frame):
+    print_to_console("\n")
+    logger.warning("Canceled by user")
+    sys.exit(0)
+
+# Register the handler for SIGINT (Ctrl+C)
+signal.signal(signal.SIGINT, signal_handler)
+
+# Your existing code follows...
 
 header_written = False
 idx_asc = 0
@@ -77,7 +93,7 @@ def get_timeline(db_path, logtype):
         return timeline
 
     except sqlite3.Error as e:
-        logging.warning(f"An error occurred: {e}")
+        logger.warning(f"An error occurred: {e}")
         return None
         
 
@@ -105,18 +121,7 @@ def execute_survey_fields():
     total_queries = 1  # or however many queries you expect to process
     surveyed_fields = survey_fields(tids, total_queries)
     return surveyed_fields
-  
-    
 
-def execute_regular_search(args, fields):
-    tids = [tid for tid in [FAZapi.search_request(args.logtype, args.query, args.st, args.et) for _ in range(10)] if tid is not None and tid != -11]
-    total = asyncio.run(fetchlogs.fetch_search_results(tids, 1, lambda results_resp_json: fetchlogs.print_logs(results_resp_json, fields, 0, 1)))
-    # tids, lambda results_resp_json: default_result_processor(results_resp_json, fields, 0, 1)
-    
-    # for tid in tids:
-        # FAZapi.close_tid(tid)
-    logging.info(f"Total results: {total}")
-    
 
 def validate_ip(ip_string):
     # Check if there's more than one '*' in the IP string
@@ -174,15 +179,15 @@ def validate_query(query, fields):
     # Split the query into key-value pairs
     pairs = re.findall(r'(\w+)[=~><](\S+)', modified_query)
     
-    logging.debug(f"Parsed query pairs: {pairs}")
+    logger.debug(f"Parsed query pairs: {pairs}")
     
     # If there are no pairs, check if the query is not empty
     if not pairs:
-        logging.debug(f"No key-value pairs found. Query is {pairs}")
+        logger.debug(f"No key-value pairs found. Query is {pairs}")
         return False
     
     for key, value in pairs:
-        logging.debug(f"Validating pair: {key}={value}")
+        logger.debug(f"Validating pair: {key}={value}")
         # Strip any extraneous characters
         value = value.replace(')', '').replace('(','')
         if key not in fields:
@@ -191,108 +196,116 @@ def validate_query(query, fields):
             
         if key.lower() in ['src', 'dst', 'srcip', 'dstip', 'transip']:
             if not validate_ip(value):
-                logging.error(f"Invalid IP address: {value}")
+                logger.error(f"Invalid IP address: {value}")
                 return False
         elif 'port' in key.lower():
             if not validate_port(value):
-                logging.error(f"Invalid port: {value}")
+                logger.error(f"Invalid port: {value}")
                 return False
         else:
-            logging.debug(f"Key '{key}' does not require special validation.")
+            logger.debug(f"Key '{key}' does not require special validation.")
     
-    logging.debug("Query validation successful.")
+    logger.debug("Query validation successful.")
     return True
 
 
-def print_to_console(message):
-    is_redirected = not sys.stdout.isatty()
-    
-    if is_redirected:
-        print(message, file=sys.stderr, flush=True)
-        return
-    print(message)
 
 
 def is_process_running(devtype):
     LOCK_FILE = f"{devtype}.lock"
     return os.path.exists(LOCK_FILE)
-    
-def update_SQLiteDB(args, fields, devtype):
-    
+
+
+def update_SQLiteDB(args, devtype):
     if is_process_running(devtype):
         print_to_console("An update_SQLiteDB process is already running. Please wait for it to finish.")
     else:
         python_executable = sys.executable
-        subprocess_script_path = os.path.abspath("update_SQLiteDB.py")
+        subprocess_script_path = os.path.abspath("FAZsqlite.py")
         args_json = json.dumps(vars(args))
-        fields_json = json.dumps(fields)
-        cmd = [python_executable, subprocess_script_path, args_json, fields_json, devtype]
+        cmd = [python_executable, subprocess_script_path, args_json]
 
         with open(os.path.join('FAZlogs', 'update.log'), 'w') as log_file:
-            process = subprocess.Popen(cmd,
-                                       stdout=log_file,
-                                       stderr=log_file,
-                                       creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
-        
-
-        # stdout, stderr = process.communicate()
-
-        # if stdout:
-            # print("Subprocess stdout:")
-            # print(stdout.decode())
-        # if stderr:
-            # print("Subprocess stderr:", file=sys.stderr)
-            # print(stderr.decode(), file=sys.stderr)
+            # Check platform and use appropriate flags
+            if sys.platform.startswith('win'):
+                # Windows-specific code
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=log_file,
+                    creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                # Unix-like systems (Linux, macOS)
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=log_file,
+                    start_new_session=True  # This is the Unix equivalent
+                )
 
             log_file.write(f"Started a background process to SQLite DB with pid: {str(process.pid)}\n")
 
+
 def setup_argument_parser():
     parser = argparse.ArgumentParser(description='Log search script for FortiAnalyzer')
-    parser.add_argument('-adom', required=True, choices=['waf', 'proxy', 'firewall'], help='ADOM type')
+    parser.add_argument("host", help="FortiAnalyzer IP/domain")
+    parser.add_argument('adom', choices=['waf', 'proxy', 'firewall'], help='ADOM type')
     parser.add_argument('-query', default='', help='Search query (optional)')
-    parser.add_argument('-st', required=True, help='Start time in "YYYY-MM-DD HH:MM" format')
-    parser.add_argument('-et', required=True, help='End time in "YYYY-MM-DD HH:MM" format')
+    parser.add_argument('-st', '--starttime', required=True, help='Start time in "YYYY-MM-DD HH:MM" format')
+    parser.add_argument('-et', '--endtime', required=True, help='End time in "YYYY-MM-DD HH:MM" format')
     parser.add_argument('-r', default='table', choices=['table', 'csv', 'json'], help='Output format')
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
     parser.add_argument('-logtype', default='traffic', choices=['traffic', 'app-ctrl', 'attack', 'content', 'event', 'history', 'virus', 'webfilter'], help='Log type')
     parser.add_argument('-sl', '--suspect-list', type=str, help='Path to the suspicious srcip list JSON file')
-    parser.add_argument('-timeout', type=int, default=300, help='Timeout for fetching data for a TID (in seconds)')
+    parser.add_argument('-timeout', type=int, default=60, help='Timeout for fetching data for a TID (in seconds)')
     parser.add_argument('-fields', action='store_true', help='List fields available for the provided logtype')
     parser.add_argument('-update-wl', action='store_true', help='Update white list URLS file')
     parser.add_argument('-update-db', action='store_true', help='Update SQLite DB')
-    
+
     return parser
 
-
-def setup_logging(verbose):
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
-    return logging.getLogger(__name__)
-        
 
 def main():
 
     parser = setup_argument_parser()
     args = parser.parse_args()
-    logger = setup_logging(args.verbose)
-    
+
     print_banner()
+
+
+    logger.debug_mode = args.verbose
+    logger.info("Logger is setup correctly")
+
+    # Log dbg stuff
+    command = "python " + " ".join(sys.argv)
+    logger.log("NOTICE", "Command executed: %s" % command)
+    logger.log("DEBUG", "Options: %s" % args)
+
     os.makedirs('FAZlogs', exist_ok=True)
 
-    try:
-        results = FAZapi.fazapi(args)
-        FORTI, devid, ADOM_NAME, devtype, fields = results
-        logger.debug(f"Successfully extracted information for ADOM type: {args.adom}")
-        logger.info(f"FortiFaz: {FORTI}")
-        logger.info(f"ADOM_NAME: {ADOM_NAME}")
-        logger.info(f"Log Type: {args.logtype}")
-        
-        FAZsqlite.FAZsqlite(args)
-        fetchlogs.init(args)
-    except Exception as e:
-        logger.error(f"An unexpected error occurred: {e}")
-        return
+    # try:
 
+    config = ConfigManager()
+    if not config.load_config(args):
+        return
+    FORTI = 'https://' + args.host + '/jsonrpc'
+
+    logger.debug(f"Successfully extracted information for ADOM type: {args.adom}")
+    logger.debug(f"FortiFaz: {FORTI}")
+    logger.debug(f"ADOM_NAME: {config.adom}")
+    logger.debug(f"Device ID: {config.devid}")
+    logger.debug(f"Device type: {config.devtype}")
+    logger.debug(f"Log Type: {args.logtype}")
+    logger.debug(f"Fields: {config.fields}")
+
+
+    # The instance client must be created here to refresh the session_cookie that can be used for update_db.
+    # If the session_cookie expired and update_db want to refresh, we will not be able, because it is in the background
+    # and detache. In addition, instructions like "Enter your username:" and "Enter Password: " will go into the log file.
+    # Any way, you must fix this issue, todirect user input to console even if detached
+
+    client = FAZapi(args, config)
 
     if args.update_db:
         if args.query:
@@ -301,19 +314,19 @@ def main():
                 args.query = args.query.replace(' ', '').replace('LIKE', '~').replace('%', '')
             
             logger.debug(f"Validating query: {args.query}")
-            if not validate_query(args.query, fields):
+            if not validate_query(args.query, config.fields):
                 logger.error(f"Query is invalid: {args.query}")
                 return
             logger.debug("Query validation successful.")  
         else:
             args.query = ''
             
-        update_SQLiteDB(args, fields, devtype)
+        update_SQLiteDB(args, config.devtype)
         # FAZsqlite.execute_regular_search()
         logger.info("Updating SQLite DB in the background...")
         return
 
-    db_path = os.path.join('FAZlogs', f'{devtype}.db')
+    db_path = os.path.join('FAZlogs', f'{config.devtype}.db')
 
     # Query the timeline table
     timeline = get_timeline(db_path, args.logtype)
@@ -327,7 +340,7 @@ def main():
         
      # Check the time range
     time_range_valid = False
-    time_range_valid = check_time_range(timeline, args.st, args.et)
+    time_range_valid = check_time_range(timeline, args.starttime, args.endtime)
 
     data_dict = None
     if 'TOP' in args.query:
@@ -339,7 +352,7 @@ def main():
             if os.path.exists(db_path):
                 with FAZsqlite.get_db_connection(db_path) as conn:
                     start_time = time.time()
-                    data_dict = FAZsqlite.SQLiteRead(conn, devtype, args.logtype, args.query, args.st, args.et)
+                    data_dict = FAZsqlite.SQLiteRead(conn, config.devtype, args.logtype, args.query, args.st, args.et)
                     end_time = time.time()
                     logger.info(f"Time taken to execute query: {end_time - start_time} seconds")
 
@@ -348,18 +361,18 @@ def main():
                         for http_url, count in data_dict:
                             logger.info(f"{http_url}\t{count}")
                     else:
-                        logger.info(f"Successfully read FAZlogs\{devtype}.db {args.logtype} logs.")
+                        logger.info(f"Successfully read FAZlogs\{config.devtype}.db {args.logtype} logs.")
                         results_resp_json = {"result": {"data": data_dict}}
-                        logger.info(f"Start printing results of query to {devtype} {args.logtype}: {args.query}")
-                        fetchlogs.print_logs(results_resp_json, fields, 0, 1)
+                        logger.info(f"Start printing results of query to {config.devtype} {args.logtype}: {args.query}")
+                        print_logs(results_resp_json, config.fields, 0, 1)
             else:
-                logger.warning(f"The SQLite DB FAZlogs\{devtype}.db not found!")
+                logger.warning(f"The SQLite DB FAZlogs\{config.devtype}.db not found!")
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e):
                 logger.warning("SQLite DB locked!")
 
     if not data_dict or not time_range_valid:
-        logging.info("No results returned from SQLite DB!")
+        logger.info("No results returned from SQLite DB!")
         if 'TOP' in args.query:
             return
         logger.info("Running query on FAZ ...")
@@ -373,22 +386,39 @@ def main():
                 args.query = args.query.replace(' ', '').replace('LIKE', '~').replace('%', '')
             
             logger.debug(f"Validating query: {args.query}")
-            if not validate_query(args.query, fields):
+            if not validate_query(args.query, config.fields):
                 logger.error(f"Query is invalid: {args.query}")
                 return
             logger.debug("Query validation successful.")  
             
         else:
             args.query = local_traffic
-         
-        
-        
+
         start_execution_time = time.time()
-        logger.debug(f"Query search: {args.query}") 
-        execute_regular_search(args, fields)
+        result_printer = ResultsPrinter()
+        print_logs = result_printer.print_logs
+
+        whitelist_ips: List[str] = []
+        # Initialize the log printer
+        log_printer = ResultsPrinter()
+
+        # Create a callback function that uses the log_printer
+        def callback(results_resp_json):
+            log_printer.print_logs(
+                results_resp_json,
+                config.fields,
+                args.r,
+                whitelist_ips,
+                args.adom
+            )
+
+        total = client.search(callback)
         end_execution_time = time.time()
         execution_time = end_execution_time - start_execution_time
+        logger.info(f"Total results: {total}")
+
         logger.info(f"Total execution time: {execution_time:.2f} seconds")
+        sys.exit(0)
             
     logger.info("Finished your search query")
 

@@ -1,0 +1,71 @@
+{
+
+  "login": {
+        "method": "exec",
+        "params": [
+            {"url": "/sys/login/user", "data": {"passwd": "...", "user": "..."}}
+        ],
+        "id": 1,
+        "jsonrpc": "2.0"
+  },
+
+  "logout": {
+        "method": "exec",
+        "params": [
+            {
+                "url": "/sys/logout"
+            }
+        ],
+        "session": "...",
+        "id": 2
+  },
+
+  "search_request": {
+        "method": "add",
+        "params": [
+            {
+              "url": "/logview/adom/{adom_name}/logsearch",
+              "apiver": 3,
+              "filter": "",
+              "device": [
+                {"devid": "..."}
+              ],
+                "logtype": "...",
+                "time-order": "desc",
+                "time-range": {"start": "string", "end": "string"}
+            }
+        ],
+        "jsonrpc": "2.0",
+        "session": "...",
+        "id": 3
+      },
+
+      "search_results": {
+        "method": "get",
+        "params": [
+            {
+                "url": "/logview/adom/{adom_name}/logsearch/{tid}",
+                "apiver": 3,
+                "offset": 0,
+                "limit": 500
+            }
+        ],
+        "jsonrpc": "2.0",
+        "session": "...",
+        "id": 4
+      },
+
+      "cancel_search": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "delete",
+        "params": [
+            {
+                "apiver": "3",
+                "url": "/logview/adom/{adom_name}/logsearch/{tid}"
+            }
+        ],
+        "session": "..."
+
+      }
+}

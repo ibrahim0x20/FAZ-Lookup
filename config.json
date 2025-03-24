@@ -1,7 +1,5 @@
 {
-
-	"uri" : "https://192.168.1.100/jsonrpc",
-	"waf": 
+	"waf":
 	{	
 		"devid" : "All_FortiWeb",
 		"adom" : "FortiWeb",
@@ -27,7 +25,7 @@
 	"proxy" : 
 	{
 		"devid": "All_FortiProxy",
-		"adom" : "FortiProxy",
+		"adom" : "KACST-FortiProxy",
 		"devtype": "Proxy",
 		"logtype": 
 		{		
@@ -62,7 +60,7 @@
 	"firewall" : 
 	{
 		"devid": "All_FortiGate",
-		"adom" : "FortiGate",
+		"adom" : "KACST-FortiGate",
 		"devtype": "Fortigate",
 		"logtype": 
 		{

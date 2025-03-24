@@ -6,7 +6,7 @@ import ast
 import argparse
 import json
 import logging
-import fetchlogs
+import progress
 import time
 import sqlite3
 
